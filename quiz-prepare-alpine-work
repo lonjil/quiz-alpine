@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Copyright (c) 2023, Rob Norris <robn@despairlabs.com>
+
+set -uo pipefail
+
+usage() {
+  cat <<EOF
+create or update the work dir for the quiz microvm
+usage: quiz-prepare-work [opts]
+
+options:
+  -k <kernel>
+        kernel to use for this run
+  -N    always create a new dir (without this, update existing)
+  -h    this help
+EOF
+  exit 1
+}
+
+trace() {
+  local STAMP
+  STAMP=$(date +%Y%m%d-%H:%M:%S)
+  echo "[quiz-prepare-root] $STAMP $*" >&2
+}
+
+fail() {
+  trace "FATAL $*"
+  exit 1
+}
+trap fail ERR
+
+
+RUNDIR=$(realpath "$(dirname "$0")")
+source "$RUNDIR"/quiz-config
+source "$RUNDIR"/quiz-lib
+
+opt_new=0
+opt_kernel=""
+
+OPTIND=1
+while getopts "k:Nh" opt
+do
+  case "$opt" in
+    'k') opt_kernel=$OPTARG ;;
+    'N') opt_new=1 ;;
+    'h') usage ;;
+    *) exit 1 ;;
+  esac
+done
+shift $(("$OPTIND" - 1))
+
+cd "$RUNDIR" || exit
+
+quiz_select_kernel "$opt_kernel"
+# shellcheck disable=SC2119
+quiz_explode_kernel_version
+
+if [[ ! -d system/work ]] ; then
+  opt_new=1
+fi
+
+if [[ $opt_new = 0 ]] ; then
+  trace "updating existing work dir"
+else
+  trace "creating new work dir"
+  rm -rf system/work
+  mkdir -p system/work
+fi
+
+for d in lib lib64 sbin bin ; do
+  mkdir -p system/work/usr/$d
+  mkdir -p system/work/$d
+done
+
+trace "install kernel module structure"
+make -C build/kernel/linux-"$_quiz_ksrcver" install modules_install \
+  INSTALL_PATH="$RUNDIR"/system/work INSTALL_MOD_PATH="$RUNDIR"/system/work
+/sbin/depmod -b "$RUNDIR"/system/work "$QUIZ_KERNEL_VERSION"
+
+trace "done"
+
+# vim: ft=bash

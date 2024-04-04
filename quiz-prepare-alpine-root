@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Copyright (c) 2023, Rob Norris <robn@despairlabs.com>
+
+set -uo pipefail
+
+usage() {
+  cat <<EOF
+create a minimal root filesystem for the quiz microvm
+usage: quiz-prepare-root
+EOF
+  exit 1
+}
+
+trace() {
+  local STAMP
+  STAMP=$(date +%Y%m%d-%H:%M:%S)
+  echo "[quiz-prepare-root] $STAMP $*" >&2
+}
+
+fail() {
+  trace "FATAL $*"
+  exit 1
+}
+trap fail ERR
+
+RUNDIR=$(realpath "$(dirname "$0")")
+source "$RUNDIR"/quiz-config
+
+OPTIND=1
+while getopts "h" opt
+do
+  case "$opt" in
+    'h') usage ;;
+    *) exit 1 ;;
+  esac
+done
+shift $(("$OPTIND" - 1))
+
+trace "building root image"
+
+mkdir -p "$RUNDIR"/system
+
+zfs_extras="libtirpc"
+zfstest_extras="bc bzip2 cpio file fio acl sysstat samba-common-tools openssl \
+                pax-utils iputils-ping python3 rsync openssh-client-default \
+                binutils attr nfs-utils lsscsi parted"
+debug_extras="jq gdb strace fio bpftrace perf xxd mdadm"
+
+rootimg="$RUNDIR"/system/alpine-"$QUIZ_ALPINE_RELEASE"
+
+sudo alpine-make-rootfs \
+  --branch "$QUIZ_ALPINE_RELEASE" \
+  --timezone "${TZ:-UTC}" \
+  --packages "tini eudev coreutils procps kmod device-mapper util-linux-misc zsh \
+              mount umount sed tmux grep $zfs_extras $zfstest_extras $debug_extras" \
+  "$rootimg".tar - <<SCRIPT
+    install -m 755 "$RUNDIR"/alpine-init/init1 "\$ROOTFS"/sbin/init
+    mkdir -p "\$ROOTFS"/mnt/quiz-init "\$ROOTFS"/mnt/quiz-system \
+             "\$ROOTFS"/mnt/quiz-user "\$ROOTFS"/mnt/lower \
+             "\$ROOTFS"/mnt/overlay "\$ROOTFS"/mnt/newroot
+SCRIPT
+
+if [ -e "$rootimg".sqfs ]
+then
+  rm "$rootimg".sqfs
+fi
+tar2sqfs -c lz4 "$rootimg".sqfs < "$rootimg".tar
+sudo rm "$rootimg".tar
+
+
+trace "done"
+
+# vim: ft=bash

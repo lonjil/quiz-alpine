@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Copyright (c) 2023, Rob Norris <robn@despairlabs.com>
+
+set -uo pipefail
+
+usage() {
+  cat <<EOF
+spin up a qemu microvm with ZFS ready to go
+usage: quiz [opts] [program [args...]]
+
+options:
+  -p <profile,...>
+        list of profiles to include in this run
+  -k <kernel>
+        kernel to use for this run
+  -S    drop into shell after run script completes
+  -h    this help
+EOF
+  exit 1
+}
+
+trace() {
+  local STAMP
+  STAMP=$(date +%Y%m%d-%H:%M:%S)
+  echo "[quiz-prepare-root] $STAMP $*" >&2
+}
+
+fail() {
+  trace "FATAL $*"
+  exit 1
+}
+trap fail ERR
+
+RUNDIR=$(realpath "$(dirname "$0")")
+source "$RUNDIR"/quiz-config
+source "$RUNDIR"/quiz-lib
+
+opt_kernel=""
+opt_profile="$QUIZ_PROFILE"
+opt_shell=""
+
+OPTIND=1
+while getopts "k:p:Sh" opt
+do
+  case "$opt" in
+    'k') opt_kernel=$OPTARG ;;
+    'p') opt_profile=$OPTARG ;;
+    'S') opt_shell=1 ;;
+    'h') usage ;;
+    *) exit 1 ;;
+  esac
+done
+shift $(("$OPTIND" - 1))
+
+quiz_select_kernel "$opt_kernel"
+
+# create init dir and install second stage
+rm -rf "$RUNDIR"/system/init
+mkdir -p "$RUNDIR"/system/init/.quiz
+install -m 755 alpine-init/init2 "$RUNDIR"/system/init/.quiz/init2
+
+# XXX ensure user dir exists
+mkdir -p "$RUNDIR"/system/user
+
+# delete profile file insertions from previous runs
+# XXX maybe these should be part of .quiz and in the overlay
+find profile/*/etc -type f | cut -d/ -f3- | \
+  awk "{ print \"$RUNDIR/system/work/\" \$1 }" | \
+  xargs rm -f
+
+# get profiles set up. source the profile setup here, and build a profile init
+# to be run right before we exec into the real program
+# shellcheck disable=SC2001
+profiles=$(echo "$opt_profile" | sed 's/,/ /g')
+if [[ $profiles ]] ; then
+  for v in ${!QUIZ_@} ; do
+    echo "$v=${!v@Q}" >> "$RUNDIR"/system/init/.quiz/init.profile
+  done
+fi
+for p in $profiles ; do
+  if [[ ! -d $RUNDIR/profile/$p ]] ; then
+    fail "unknown profile: $p"
+  fi
+  trace "including profile: $p"
+
+  if [[ -f $RUNDIR/profile/$p/setup ]] ; then
+    source "$RUNDIR"/profile/"$p"/setup
+  fi
+
+  if [[ -f $RUNDIR/profile/$p/init ]] ; then
+    echo "echo 'quiz: starting profile init: $p' >> /dev/kmsg" \
+      >> "$RUNDIR"/system/init/.quiz/init.profile
+    cat "$RUNDIR"/profile/"$p"/init >> "$RUNDIR"/system/init/.quiz/init.profile
+  fi
+
+  # insert profile-specific files into /etc and /usr/local
+  # XXX maybe these should be part of .quiz and in the overlay
+  if [[ -d $RUNDIR/profile/$p/etc ]] ; then
+    rsync -a "$RUNDIR"/profile/"$p"/etc/ "$RUNDIR"/system/work/etc/
+  fi
+  if [[ -d $RUNDIR/profile/$p/local ]] ; then
+    rsync -a "$RUNDIR"/profile/"$p"/local/ "$RUNDIR"/system/work/usr/local/
+  fi
+done
+
+# if they wanted a specific command, set up a run script for init to execute
+rm -f "$RUNDIR"/system/init/.quiz/run
+if [[ $# -ne 0 ]] ; then
+  trace "creating run script"
+  echo "$@" > "$RUNDIR"/system/init/.quiz/run
+  if [[ $opt_shell ]] ; then
+    echo "exec /bin/bash" >> "$RUNDIR"/system/init/.quiz/run
+  fi
+  chmod +x "$RUNDIR"/system/init/.quiz/run
+fi
+
+trace "starting microvm"
+
+# -chardev socket,path=quiz-socket,server=on,wait=on,id=virtiocon0 \
+#  -chardev pty,id=virtiocon0 \
+
+# -append "earlyprintk=hvc0 console=hvc0 root=/dev/vda ro reboot=t $QUIZ_KERNEL_OPTS" \
+
+# this is hand rolled from my early tests. seems right but its a lot of mess
+qemu-system-x86_64 \
+	-M microvm,pit=off,pic=off,rtc=off,isa-serial=off \
+	-enable-kvm \
+		-cpu host -m 2G -smp 2 \
+  -kernel "$RUNDIR"/system/bzImage-"$QUIZ_KERNEL_VERSION" \
+    -append "console=hvc0 root=/dev/vda ro reboot=t $QUIZ_KERNEL_OPTS" \
+  -nodefaults -no-user-config -nographic \
+  -chardev stdio,mux=on,id=char0 \
+  -mon chardev=char0,mode=readline \
+  -device virtio-serial-device \
+  -device virtconsole,chardev=char0 \
+  -device virtio-balloon-device \
+  -device pvpanic \
+  -drive id=root,file="$RUNDIR"/system/alpine-"$QUIZ_ALPINE_RELEASE".sqfs,format=raw,read-only=on,if=none \
+  -device virtio-blk-device,drive=root,serial=root \
+  -fsdev local,id=quiz-init,path="$RUNDIR"/system/init,security_model=none,readonly=on \
+  -device virtio-9p-device,fsdev=quiz-init,mount_tag=quiz-init \
+  -fsdev local,id=quiz-system,path="$RUNDIR"/system/work,security_model=none,readonly=on \
+  -device virtio-9p-device,fsdev=quiz-system,mount_tag=quiz-system \
+  -fsdev local,id=quiz-user,path="$RUNDIR"/system/user,security_model=none,readonly=on \
+  -device virtio-9p-device,fsdev=quiz-user,mount_tag=quiz-user \
+  $QUIZ_QEMU_OPTS \
+
+trace "done"
+
+# vim: ft=bash
