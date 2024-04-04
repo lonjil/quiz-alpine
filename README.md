@@ -4,6 +4,10 @@
 
 **quiz** is a program to support fast edit-compile-test cycles for Linux kernel development, with a focus on OpenZFS. At its heart its a qemu-based microvm, stripped down to the essentials to setup and boot a VM and start a test program in under a second.
 
+### Note!
+
+This is a fork to use Alpine instead of Debian for the rootfs. Why? Because I couldn't get mmdebstrap to work.
+
 ## Motivation
 
 My preferred programming style is highly interactive and exploratory, which requires a fast edit-compile-test cycle. But then I started working I work on [OpenZFS](https://openzfs.org), which is a big chunk of kernel code. Kernel code means developing on either real hardware or a VM, which tend to be awkward to get real code onto, and then, being kernel code, its pretty easy to crash, wedge or otherwise damage the kernel, requiring a reboot.
